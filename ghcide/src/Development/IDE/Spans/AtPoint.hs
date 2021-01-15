@@ -23,14 +23,14 @@ import Development.IDE.Spans.Common
 import Development.IDE.Core.RuleTypes
 
 -- GHC API imports
-import FastString
-import Name
-import Outputable hiding ((<>))
-import SrcLoc
-import TyCoRep
-import TyCon
-import qualified Var
-import NameEnv
+import GHC.Data.FastString
+import GHC.Types.Name
+--import Outputable hiding ((<>))
+import GHC.Types.SrcLoc
+import GHC.Core.TyCon
+import GHC.Core.TyCo.Rep
+import qualified GHC.Types.Var as Var
+import GHC.Types.Name.Env
 
 import Control.Applicative
 import Control.Monad.Extra
@@ -48,7 +48,7 @@ import Data.List.Extra (dropEnd1)
 documentHighlight
   :: Monad m
   => HieASTs Type
-  -> RefMap
+  -> RefMap Type
   -> Position
   -> MaybeT m [DocumentHighlight]
 documentHighlight hf rf pos = MaybeT $ pure (Just highlights)
@@ -129,7 +129,7 @@ atPoint IdeOptions{} hf (DKMap dm km) pos = listToMaybe $ pointCommand hf pos ho
           -- see the code of 'pprNameDefnLoc' for more information
           case nameSrcLoc name of
             UnhelpfulLoc {} | isInternalName name || isSystemName name -> []
-            _ -> ["*Defined " <> T.pack (showSDocUnsafe $ pprNameDefnLoc name) <> "*"]
+            _ -> ["*Defined " <> T.pack (showGhc $ pprNameDefnLoc name) <> "*"]
 
 typeLocationsAtPoint
   :: forall m
@@ -167,7 +167,7 @@ locationsAtPoint getHieFile _ideOptions imports pos ast =
 nameToLocation :: Monad f => (Module -> MaybeT f (HieFile, String)) -> Name -> f (Maybe Location)
 nameToLocation getHieFile name = fmap (srcSpanToLocation =<<) $
   case nameSrcSpan name of
-    sp@(RealSrcSpan _) -> pure $ Just sp
+    sp@(RealSrcSpan {}) -> pure $ Just sp
     sp@(UnhelpfulSpan _) -> runMaybeT $ do
       guard (sp /= wiredInSrcSpan)
       -- This case usually arises when the definition is in an external package.
@@ -185,7 +185,7 @@ nameToLocation getHieFile name = fmap (srcSpanToLocation =<<) $
     -- We ignore uniques and source spans and only compare the name and the module.
     eqName :: Name -> Name -> Bool
     eqName n n' = nameOccName n == nameOccName n' && nameModule_maybe n == nameModule_maybe n'
-    setFileName f (RealSrcSpan span) = RealSrcSpan (span { srcSpanFile = mkFastString f })
+    setFileName f (RealSrcSpan span _) = RealSrcSpan (span { srcSpanFile = mkFastString f }) Nothing
     setFileName _ span@(UnhelpfulSpan _) = span
 
 pointCommand :: HieASTs Type -> Position -> (HieAST Type -> a) -> [a]
@@ -196,7 +196,7 @@ pointCommand hf pos k =
         Just ast' -> Just $ k ast'
  where
    sloc fs = mkRealSrcLoc fs (line+1) (cha+1)
-   sp fs = mkRealSrcSpan (sloc fs) (sloc fs)
+   sp (LexicalFastString fs) = mkRealSrcSpan (sloc fs) (sloc fs)
    line = _line pos
    cha = _character pos
 

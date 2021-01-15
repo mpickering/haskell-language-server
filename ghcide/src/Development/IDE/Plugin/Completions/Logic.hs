@@ -22,15 +22,15 @@ import Data.Maybe (listToMaybe, fromMaybe, mapMaybe)
 import qualified Data.Text as T
 import qualified Text.Fuzzy as Fuzzy
 
-import HscTypes
-import Name
-import RdrName
-import Type
-import Packages
+--import GHC.Driver.Types
+import GHC.Types.Name
+import GHC.Types.Name.Reader
+import GHC.Core.Type
+--import Packages
 #if MIN_GHC_API_VERSION(8,10,0)
-import Predicate (isDictTy)
-import Pair
-import Coercion
+import GHC.Core.Predicate (isDictTy)
+import GHC.Data.Pair
+import GHC.Core.Coercion
 #endif
 
 import Language.Haskell.LSP.Types
@@ -46,14 +46,15 @@ import Development.IDE.GHC.Error
 import Development.IDE.Types.Options
 import Development.IDE.Spans.Common
 import Development.IDE.GHC.Util
-import Outputable (Outputable)
+import GHC.Utils.Outputable (Outputable)
 import qualified Data.Set as Set
-import ConLike
+import GHC.Core.ConLike
 
-import GhcPlugins (
+import GHC.Plugins (
     flLabel,
-    unpackFS)
+    unpackFS, listVisibleModuleNames )
 import Data.Either (fromRight)
+import GHC.Driver.Env
 
 -- From haskell-ide-engine/hie-plugin-api/Haskell/Ide/Engine/Context.hs
 
@@ -220,12 +221,12 @@ mkNameCompItem origName origMod thingType isInfix docs !imp = CI{..}
         getArgs t
           | isPredTy t = []
           | isDictTy t = []
-          | isForAllTy t = getArgs $ snd (splitForAllTys t)
+          | isForAllTy t = getArgs $ snd (splitForAllTyCoVars t)
           | isFunTy t =
             let (args, ret) = splitFunTys t
               in if isForAllTy ret
                   then getArgs ret
-                  else Prelude.filter (not . isDictTy) args
+                  else Prelude.filter (not . isDictTy) (map irrelevantMult args)
           | isPiTy t = getArgs $ snd (splitPiTys t)
 #if MIN_GHC_API_VERSION(8,10,0)
           | Just (Pair _ t) <- coercionKind <$> isCoercionTy_maybe t
@@ -288,16 +289,16 @@ cacheDataProducer packageState curMod rdrEnv limports deps = do
   let dflags = hsc_dflags packageState
       curModName = moduleName curMod
 
-      iDeclToModName :: ImportDecl name -> ModuleName
+      iDeclToModName :: ImportDecl GhcPs -> ModuleName
       iDeclToModName = unLoc . ideclName
 
-      asNamespace :: ImportDecl name -> ModuleName
+      asNamespace :: ImportDecl GhcPs -> ModuleName
       asNamespace imp = maybe (iDeclToModName imp) GHC.unLoc (ideclAs imp)
       -- Full canonical names of imported modules
       importDeclerations = map unLoc limports
 
       -- The list of all importable Modules from all packages
-      moduleNames = map showModName (listVisibleModuleNames dflags)
+      moduleNames = map showModName (listVisibleModuleNames (hsc_units packageState))
 
       -- The given namespaces for the imported modules (ie. full name, or alias if used)
       allModNamesAsNS = map (showModName . asNamespace) importDeclerations
@@ -426,10 +427,10 @@ findRecordCompl pmod mn DataDecl {tcdLName, tcdDataDefn} = result
                  ]
         doc = SpanDocText (getDocumentation [pmod] tcdLName) (SpanDocUris Nothing Nothing)
 
-        getFlds :: HsConDetails arg (Located [LConDeclField GhcPs]) -> Maybe [ConDeclField GhcPs]
+        getFlds :: HsConDetails tyarg arg (Located [LConDeclField GhcPs]) -> Maybe [ConDeclField GhcPs]
         getFlds conArg = case conArg of
                              RecCon rec -> Just $ unLoc <$> unLoc rec
-                             PrefixCon _ -> Just []
+                             PrefixCon _ _ -> Just []
                              _ -> Nothing
 
         extract ConDeclField{..}

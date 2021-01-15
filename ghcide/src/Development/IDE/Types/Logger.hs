@@ -44,7 +44,7 @@ logInfo :: Logger -> T.Text -> IO ()
 logInfo x = logPriority x Info
 
 logDebug :: Logger -> T.Text -> IO ()
-logDebug x = logPriority x Debug
+logDebug x = logPriority x Info
 
 logTelemetry :: Logger -> T.Text -> IO ()
 logTelemetry x = logPriority x Telemetry

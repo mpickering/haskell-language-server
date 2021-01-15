@@ -30,21 +30,26 @@ import           Development.IDE.Core.RuleTypes
 import           System.Directory
 import           System.FilePath
 
-import           FastString
-import           SrcLoc (RealLocated)
-import           GhcMonad
-import           Packages
-import           Name
+import           GHC.Data.FastString
+import           GHC.Types.SrcLoc (RealLocated)
+--import           GHC.Monad
+--import           Packages
+import           GHC.Types.Name
 import           Language.Haskell.LSP.Types (getUri, filePathToUri)
-import           TcRnTypes
-import           ExtractDocs
-import           NameEnv
-import HscTypes (HscEnv(hsc_dflags))
+--import           TcRnTypes
+import           GHC.HsToCore.Docs
+import           GHC.Types.Name.Env
+import GHC.Driver.Env (HscEnv(hsc_dflags), hsc_units)
+import GHC.Unit.Types
+import GHC.Tc.Types
+import Control.Monad.IO.Class
+import GHC.Unit.State
+import qualified GHC.Data.ShortText as S
 
 mkDocMap
   :: HscEnv
   -> [ParsedModule]
-  -> RefMap
+  -> RefMap Type
   -> TcGblEnv
   -> IO DocAndKindMap
 mkDocMap env sources rm this_mod =
@@ -95,8 +100,8 @@ getDocumentationsTryGhc env mod sources names = do
       (docFu, srcFu) <-
         case nameModule_maybe name of
           Just mod -> liftIO $ do
-            doc <- toFileUriText $ lookupDocHtmlForModule df mod
-            src <- toFileUriText $ lookupSrcHtmlForModule df mod
+            doc <- toFileUriText $ lookupDocHtmlForModule (hsc_units env) mod
+            src <- toFileUriText $ lookupSrcHtmlForModule (hsc_units env) mod
             return (doc, src)
           Nothing -> pure (Nothing, Nothing)
       let docUri = (<> "#" <> selector <> showName name) <$> docFu
@@ -161,7 +166,7 @@ getDocumentation sources targetName = fromMaybe [] $ do
     sortedNameSpans :: [Located RdrName] -> [RealSrcSpan]
     sortedNameSpans ls = nubSort (mapMaybe (realSpan . getLoc) ls)
     isBetween target before after = before <= target && target <= after
-    ann = snd . pm_annotations
+    ann = const (M.empty) --apiAnnItems . pm_annotations
     annotationFileName :: ParsedModule -> Maybe FastString
     annotationFileName = fmap srcSpanFile . listToMaybe . realSpans . ann
     realSpans :: M.Map SrcSpan [Located a] -> [RealSrcSpan]
@@ -189,18 +194,18 @@ docHeaders = mapMaybe (\(L _ x) -> wrk x)
 -- | Given a module finds the local @doc/html/Foo-Bar-Baz.html@ page.
 -- An example for a cabal installed module:
 -- @~/.cabal/store/ghc-8.10.1/vctr-0.12.1.2-98e2e861/share/doc/html/Data-Vector-Primitive.html@
-lookupDocHtmlForModule :: DynFlags -> Module -> IO (Maybe FilePath)
+lookupDocHtmlForModule :: UnitState -> Module -> IO (Maybe FilePath)
 lookupDocHtmlForModule =
   lookupHtmlForModule (\pkgDocDir modDocName -> pkgDocDir </> modDocName <.> "html")
 
 -- | Given a module finds the hyperlinked source @doc/html/src/Foo.Bar.Baz.html@ page.
 -- An example for a cabal installed module:
 -- @~/.cabal/store/ghc-8.10.1/vctr-0.12.1.2-98e2e861/share/doc/html/src/Data.Vector.Primitive.html@
-lookupSrcHtmlForModule :: DynFlags -> Module -> IO (Maybe FilePath)
+lookupSrcHtmlForModule :: UnitState -> Module -> IO (Maybe FilePath)
 lookupSrcHtmlForModule =
   lookupHtmlForModule (\pkgDocDir modDocName -> pkgDocDir </> "src" </> modDocName <.> "html")
 
-lookupHtmlForModule :: (FilePath -> FilePath -> FilePath) -> DynFlags -> Module -> IO (Maybe FilePath)
+lookupHtmlForModule :: (FilePath -> FilePath -> FilePath) -> UnitState -> Module -> IO (Maybe FilePath)
 lookupHtmlForModule mkDocPath df m = do
   -- try all directories
   let mfs = fmap (concatMap go) (lookupHtmls df ui)
@@ -210,7 +215,7 @@ lookupHtmlForModule mkDocPath df m = do
   traverse canonicalizePath html
   where
     go pkgDocDir = map (mkDocPath pkgDocDir) mns
-    ui = moduleUnitId m
+    ui = moduleUnit m
     -- try to locate html file from most to least specific name e.g.
     --  first Language.Haskell.LSP.Types.Uri.html and Language-Haskell-LSP-Types-Uri.html
     --  then Language.Haskell.LSP.Types.html and Language-Haskell-LSP-Types.html etc.
@@ -219,8 +224,8 @@ lookupHtmlForModule mkDocPath df m = do
       -- The file might use "." or "-" as separator
       map (`intercalate` chunks) [".", "-"]
 
-lookupHtmls :: DynFlags -> UnitId -> Maybe [FilePath]
+lookupHtmls :: UnitState -> Unit -> Maybe [FilePath]
 lookupHtmls df ui =
   -- use haddockInterfaces instead of haddockHTMLs: GHC treats haddockHTMLs as URL not path
   -- and therefore doesn't expand $topdir on Windows
-  map takeDirectory . haddockInterfaces <$> lookupPackage df ui
+  map takeDirectory . map S.unpack . unitHaddockInterfaces <$> lookupUnit df ui

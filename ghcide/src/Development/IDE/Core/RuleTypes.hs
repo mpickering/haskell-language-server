@@ -6,6 +6,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | A Shake implementation of the compiler service, built
 --   using the "Shaker" abstraction layer for in-memory use.
@@ -29,20 +30,24 @@ import qualified Data.Map as M
 import           Development.Shake
 import           GHC.Generics                             (Generic)
 
-import Module (InstalledUnitId)
-import HscTypes (ModGuts, hm_iface, HomeModInfo, hm_linkable)
+import GHC.Unit.Module.ModGuts
+import GHC.Unit.Home.ModInfo
 
 import           Development.IDE.Spans.Common
 import           Development.IDE.Spans.LocalBindings
 import           Development.IDE.Import.FindImports (ArtifactsLocation)
 import Data.ByteString (ByteString)
 import Language.Haskell.LSP.Types (NormalizedFilePath)
-import TcRnMonad (TcGblEnv)
 import qualified Data.ByteString.Char8 as BS
 import Development.IDE.Types.Options (IdeGhcSession)
 import Data.Text (Text)
 import Data.Int (Int64)
 import GHC.Serialized (Serialized)
+import GHC.Unit.Types
+import GHC.Tc.Types
+import GHC.Linker.Types
+
+type InstalledUnitId = UnitId
 
 data LinkableType = ObjectLinkable | BCOLinkable
   deriving (Eq,Ord,Show)
@@ -169,7 +174,7 @@ data HieAstResult
   = HAR
   { hieModule :: Module
   , hieAst :: !(HieASTs Type)
-  , refMap :: RefMap
+  , refMap :: RefMap Type
   -- ^ Lazy because its value only depends on the hieAst, which is bundled in this type
   -- Lazyness can't cause leaks here because the lifetime of `refMap` will be the same
   -- as that of `hieAst`

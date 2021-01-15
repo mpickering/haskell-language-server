@@ -30,9 +30,9 @@ import Language.Haskell.LSP.Types (Location(..), Range(..), Position(..))
 import Control.Monad
 import Data.Hashable (Hashable(hash))
 import Data.String
-import FastString
+import GHC.Data.FastString
 import qualified Language.Haskell.LSP.Types as LSP
-import SrcLoc as GHC
+import GHC.Types.SrcLoc as GHC
 import Text.ParserCombinators.ReadP as ReadP
 import Data.Maybe (fromMaybe)
 

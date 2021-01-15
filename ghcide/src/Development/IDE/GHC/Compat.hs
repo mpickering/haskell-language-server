@@ -32,9 +32,9 @@ module Development.IDE.GHC.Compat(
     getModuleHash,
     getPackageName,
     setUpTypedHoles,
-    GHC.ModLocation,
-    Module.addBootSuffix,
-    pattern ModLocation,
+    GG.ModLocation,
+    addBootSuffix,
+    pattern Development.IDE.GHC.Compat.ModLocation,
     pattern ExposePackage,
     HasSrcSpan,
     getLoc,
@@ -45,7 +45,7 @@ module Development.IDE.GHC.Compat(
 
 #if MIN_GHC_API_VERSION(8,10,0)
     module GHC.Hs.Extension,
-    module LinkerTypes,
+--    module LinkerTypes,
 #else
     module HsExtension,
     noExtField,
@@ -53,7 +53,7 @@ module Development.IDE.GHC.Compat(
 #endif
 
     module GHC,
-    module DynFlags,
+    module GHC.Driver.Session,
     initializePlugins,
     applyPluginsParsedResultAction,
     module Compat.HieTypes,
@@ -62,25 +62,31 @@ module Development.IDE.GHC.Compat(
     ) where
 
 #if MIN_GHC_API_VERSION(8,10,0)
-import LinkerTypes
+--import GHC.Runtime.Linker
 #endif
 
-import StringBuffer
-import qualified DynFlags
-import DynFlags hiding (ExposePackage)
-import Fingerprint (Fingerprint)
-import qualified Module
-import Packages
+import GHC.Data.StringBuffer
+import qualified GHC.Driver.Session
+import GHC.Driver.Session hiding (ExposePackage)
+import GHC.Utils.Fingerprint (Fingerprint)
+import qualified GHC.Unit.State
+import GHC.Unit.State
 import Data.IORef
-import HscTypes
-import NameCache
+import GHC.Driver.Env
+import GHC.Types.Name.Cache
 import qualified Data.ByteString as BS
-import MkIface
-import TcRnTypes
+import GHC.Iface.Make
+import GHC.Unit.Module.Location
+import GHC.Iface.Recomp
+import GHC.Tc.Types
 import Compat.HieAst (mkHieFile,enrichHie)
 import Compat.HieBin
 import Compat.HieTypes
 import Compat.HieUtils
+import GHC.Iface.Env
+import GHC.Unit.Module.ModIface
+import GHC.Unit.Types
+import GHC.Data.FastString
 
 #if MIN_GHC_API_VERSION(8,10,0)
 import GHC.Hs.Extension
@@ -88,22 +94,23 @@ import GHC.Hs.Extension
 import HsExtension
 #endif
 
-import qualified GHC
+import qualified GHC hiding (ModLocation)
+import qualified GHC as GG
 import GHC hiding (
       ModLocation,
       HasSrcSpan,
       lookupName,
       getLoc
     )
-import Avail
+import GHC.Types.Avail
 #if MIN_GHC_API_VERSION(8,8,0)
 import Data.List (foldl')
 #else
 import Data.List (foldl', isSuffixOf)
 #endif
 
-import DynamicLoading
-import Plugins (Plugin(parsedResultAction), withPlugins)
+import GHC.Runtime.Loader
+import GHC.Driver.Plugins (Plugin(parsedResultAction), withPlugins)
 import Data.Map.Strict (Map)
 
 #if !MIN_GHC_API_VERSION(8,8,0)
@@ -136,7 +143,7 @@ hieExportNames :: HieFile -> [(SrcSpan, Name)]
 hieExportNames = nameListFromAvails . hie_exports
 
 #if !MIN_GHC_API_VERSION(8,8,0)
-ml_hie_file :: GHC.ModLocation -> FilePath
+ml_hie_file :: GG.ModLocation -> FilePath
 ml_hie_file ml
   | "boot" `isSuffixOf ` ml_hi_file ml = ml_hi_file ml -<.> ".hie-boot"
   | otherwise  = ml_hi_file ml -<.> ".hie"
@@ -151,7 +158,7 @@ upNameCache = updNameCache
 #endif
 
 
-type RefMap = Map Identifier [(Span, IdentifierDetails Type)]
+--type RefMap = Map Identifier [(Span, IdentifierDetails Type)]
 
 mkHieFile' :: ModSummary
            -> [AvailInfo]
@@ -175,12 +182,12 @@ addIncludePathsQuote :: FilePath -> DynFlags -> DynFlags
 addIncludePathsQuote path x = x{includePaths = f $ includePaths x}
     where f i = i{includePathsQuote = path : includePathsQuote i}
 
-pattern ModLocation :: Maybe FilePath -> FilePath -> FilePath -> GHC.ModLocation
+pattern ModLocation :: Maybe FilePath -> FilePath -> FilePath -> GG.ModLocation
 pattern ModLocation a b c <-
 #if MIN_GHC_API_VERSION(8,8,0)
-    GHC.ModLocation a b c _ where ModLocation a b c = GHC.ModLocation a b c ""
+    GG.ModLocation a b c _ where ModLocation a b c = GG.ModLocation a b c ""
 #else
-    GHC.ModLocation a b c where ModLocation a b c = GHC.ModLocation a b c
+    GG.ModLocation a b c where ModLocation a b c = GG.ModLocation a b c
 #endif
 
 setHieDir :: FilePath -> DynFlags -> DynFlags
@@ -224,13 +231,11 @@ nameListFromAvails :: [AvailInfo] -> [(SrcSpan, Name)]
 nameListFromAvails as =
   map (\n -> (nameSrcSpan n, n)) (concatMap availNames as)
 
-#if MIN_GHC_API_VERSION(8,8,0)
-
+{-
 type HasSrcSpan = GHC.HasSrcSpan
 getLoc :: HasSrcSpan a => a -> SrcSpan
 getLoc = GHC.getLoc
-
-#else
+-}
 
 class HasSrcSpan a where
     getLoc :: a -> SrcSpan
@@ -238,10 +243,12 @@ instance HasSrcSpan Name where
     getLoc = nameSrcSpan
 instance HasSrcSpan (GenLocated SrcSpan a) where
     getLoc = GHC.getLoc
+#if MIN_GHC_API_VERSION(8,8,0)
+#else
 
 -- | Add the @-boot@ suffix to all output file paths associated with the
 -- module, not including the input file itself
-addBootSuffixLocnOut :: GHC.ModLocation -> GHC.ModLocation
+addBootSuffixLocnOut :: GG.ModLocation -> GG.ModLocation
 addBootSuffixLocnOut locn
   = locn { ml_hi_file  = Module.addBootSuffix (ml_hi_file locn)
          , ml_obj_file = Module.addBootSuffix (ml_obj_file locn)
@@ -255,8 +262,8 @@ getModuleHash = mi_mod_hash . mi_final_exts
 getModuleHash = mi_mod_hash
 #endif
 
-getPackageName :: DynFlags -> Module.InstalledUnitId -> Maybe PackageName
-getPackageName dfs i = packageName <$> lookupPackage dfs (Module.DefiniteUnitId (Module.DefUnitId i))
+getPackageName :: UnitState -> UnitId -> Maybe PackageName
+getPackageName dfs i = unitPackageName <$> lookupUnit dfs (RealUnit (Definite i))
 
 disableWarningsAsErrors :: DynFlags -> DynFlags
 disableWarningsAsErrors df =
@@ -273,7 +280,7 @@ applyPluginsParsedResultAction env dflags ms hpm_annotations parsed = do
   -- Apply parsedResultAction of plugins
   let applyPluginAction p opts = parsedResultAction p opts ms
   fmap hpm_module $
-    runHsc env $ withPlugins dflags applyPluginAction
+    runHsc env $ withPlugins env applyPluginAction
       (HsParsedModule parsed [] hpm_annotations)
 
 pattern ExposePackage :: String -> PackageArg -> ModRenaming -> PackageFlag
@@ -281,11 +288,11 @@ pattern ExposePackage :: String -> PackageArg -> ModRenaming -> PackageFlag
 #ifdef __FACEBOOK_HASKELL__
 pattern ExposePackage s a mr <- DynFlags.ExposePackage s a _ mr
 #else
-pattern ExposePackage s a mr = DynFlags.ExposePackage s a mr
+pattern ExposePackage s a mr = GHC.Driver.Session.ExposePackage s a mr
 #endif
 
 -- | Take AST representation of type signature and drop `forall` part from it (if any), returning just type's body
-dropForAll :: LHsType pass -> LHsType pass
+dropForAll :: LHsType (GhcPass pass) -> LHsType (GhcPass pass)
 #if MIN_GHC_API_VERSION(8,10,0)
 dropForAll = snd . GHC.splitLHsForAllTyInvis
 #else

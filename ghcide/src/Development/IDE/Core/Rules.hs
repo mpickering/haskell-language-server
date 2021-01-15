@@ -30,7 +30,7 @@ module Development.IDE.Core.Rules(
     getClientConfigAction,
     ) where
 
-import Fingerprint
+import GHC.Utils.Fingerprint
 
 import Data.Aeson (fromJSON, Result(Success), FromJSON)
 import Data.Binary hiding (get, put)
@@ -71,7 +71,7 @@ import Development.IDE.Core.PositionMapping
 import           Language.Haskell.LSP.Types (DocumentHighlight (..))
 
 import qualified GHC.LanguageExtensions as LangExt
-import HscTypes hiding (TargetModule, TargetFile)
+--import HscTypes hiding (TargetModule, TargetFile)
 import GHC.Generics(Generic)
 
 import qualified Development.IDE.Spans.AtPoint as AtPoint
@@ -88,16 +88,23 @@ import System.Directory ( getModificationTime )
 import Control.Exception
 
 import Control.Monad.State
-import FastString (FastString(uniq))
-import qualified HeaderInfo as Hdr
+import GHC.Data.FastString (FastString(uniq))
+import qualified GHC.Parser.Header as Hdr
 import Data.Time (UTCTime(..))
 import Data.Hashable
 import qualified Data.HashSet as HashSet
 import qualified Data.HashMap.Strict as HM
-import TcRnMonad (tcg_dependent_files)
+import GHC.Tc.Types (tcg_dependent_files)
 import Data.IORef
 import Control.Concurrent.Extra
-import Module
+import GHC.Types.SourceFile
+import GHC.Unit.Module.Env
+import GHC.Unit.Module.ModGuts
+import GHC.Unit.Home.ModInfo
+import GHC.Linker.Types
+import GHC.Driver.Env
+import GHC.Unit.Types
+--import Module
 
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
@@ -227,8 +234,8 @@ getPackageHieFile :: ShakeExtras
 getPackageHieFile ide mod file = do
     pkgState  <- hscEnv . fst <$> useE GhcSession file
     IdeOptions {..} <- liftIO $ getIdeOptionsIO ide
-    let unitId = moduleUnitId mod
-    case lookupPackageConfig unitId pkgState of
+    let unitId = moduleUnit mod
+    case lookupPackageConfig (toUnitId unitId) pkgState of
         Just pkgConfig -> do
             -- 'optLocateHieFile' returns Nothing if the file does not exist
             hieFile <- liftIO $ optLocateHieFile optPkgLocationOpts pkgConfig mod
@@ -354,7 +361,7 @@ getLocatedImportsRule =
                 = getFileExists nfp
                 | otherwise = return False
         (diags, imports') <- fmap unzip $ forM imports $ \(isSource, (mbPkgName, modName)) -> do
-            diagOrImp <- locateModule dflags import_dirs (optExtensions opt) getTargetExists modName mbPkgName isSource
+            diagOrImp <- locateModule env import_dirs (optExtensions opt) getTargetExists modName mbPkgName isSource
             case diagOrImp of
                 Left diags -> pure (diags, Left (modName, Nothing))
                 Right (FileImport path) -> pure ([], Left (modName, Just path))

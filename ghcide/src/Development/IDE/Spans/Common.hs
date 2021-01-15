@@ -25,11 +25,11 @@ import Control.DeepSeq
 import GHC.Generics
 
 import GHC
-import Outputable hiding ((<>))
-import ConLike
-import DataCon
-import Var
-import NameEnv
+import GHC.Utils.Outputable hiding ((<>))
+import GHC.Core.ConLike
+import GHC.Core.DataCon
+import GHC.Types.Var
+import GHC.Types.Name.Env
 
 import qualified Documentation.Haddock.Parser as H
 import qualified Documentation.Haddock.Types as H
@@ -40,20 +40,19 @@ type DocMap = NameEnv SpanDoc
 type KindMap = NameEnv TyThing
 
 showGhc :: Outputable a => a -> String
-showGhc = showPpr unsafeGlobalDynFlags
+showGhc = renderWithContext defaultSDocContext . ppr
 
 showName :: Outputable a => a -> T.Text
 showName = T.pack . prettyprint
   where
-    prettyprint x = renderWithStyle unsafeGlobalDynFlags (ppr x) style
-    style = mkUserStyle unsafeGlobalDynFlags neverQualify AllTheWay
+    prettyprint x = renderWithContext defaultSDocContext { sdocStyle = style } (ppr x)
+    style = mkUserStyle  neverQualify AllTheWay
 
 showNameWithoutUniques :: Outputable a => a -> T.Text
 showNameWithoutUniques = T.pack . prettyprint
   where
-    dyn = unsafeGlobalDynFlags `gopt_set` Opt_SuppressUniques
-    prettyprint x = renderWithStyle dyn (ppr x) style
-    style = mkUserStyle dyn neverQualify AllTheWay
+    prettyprint x = renderWithContext defaultSDocContext { sdocStyle = style, sdocSuppressUniques = True } (ppr x)
+    style = mkUserStyle neverQualify AllTheWay
 
 -- From haskell-ide-engine/src/Haskell/Ide/Engine/Support/HieExtras.hs
 safeTyThingType :: TyThing -> Maybe Type

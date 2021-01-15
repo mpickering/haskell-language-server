@@ -19,7 +19,7 @@ import Development.IDE.LSP.Server
 import Development.IDE.Plugin
 import Development.IDE.Types.Action
 import GHC.Generics (Generic)
-import GhcPlugins (HscEnv(hsc_dflags))
+import GHC.Plugins (HscEnv(hsc_dflags))
 import Language.Haskell.LSP.Core
 import Language.Haskell.LSP.Messages
 import Language.Haskell.LSP.Types

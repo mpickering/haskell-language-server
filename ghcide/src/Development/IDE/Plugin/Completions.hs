@@ -28,7 +28,7 @@ import Development.IDE.GHC.Compat
 
 import Development.IDE.GHC.Util
 import Development.IDE.LSP.Server
-import TcRnDriver (tcRnImportDecls)
+import GHC.Tc.Module (tcRnImportDecls)
 import Data.Maybe
 
 #if defined(GHC_LIB)

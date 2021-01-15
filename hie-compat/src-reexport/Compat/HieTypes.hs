@@ -1,3 +1,3 @@
 module Compat.HieTypes
-  ( module HieTypes ) where
-import HieTypes
+  ( module A ) where
+import GHC.Iface.Ext.Types as A

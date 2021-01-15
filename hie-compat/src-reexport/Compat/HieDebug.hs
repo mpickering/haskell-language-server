@@ -1,3 +1,3 @@
 module Compat.HieDebug
-  ( module HieDebug ) where
-import HieDebug
+  ( module A ) where
+import GHC.Iface.Ext.Debug as A

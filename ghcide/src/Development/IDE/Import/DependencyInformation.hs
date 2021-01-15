@@ -55,7 +55,10 @@ import Development.IDE.Types.Location
 import Development.IDE.Import.FindImports (ArtifactsLocation(..))
 
 import GHC
-import Module
+--import Module
+import GHC.Unit.Types
+
+type InstalledUnitId = UnitId
 
 -- | The imports for a given module.
 data ModuleImports = ModuleImports

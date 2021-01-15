@@ -39,11 +39,11 @@ import Data.ByteString.Internal (ByteString(..))
 import Data.Maybe
 import Data.Typeable
 import qualified Data.ByteString.Internal as BS
-import Fingerprint
-import GhcMonad
+import GHC.Utils.Fingerprint
+import GHC.Driver.Monad
 import Control.Exception
 import Data.IORef
-import FileCleanup
+import GHC.SysTools.FileCleanup
 import Foreign.Ptr
 import Foreign.ForeignPtr
 import Foreign.Storable
@@ -59,18 +59,24 @@ import qualified Data.Text                as T
 import qualified Data.Text.Encoding       as T
 import qualified Data.Text.Encoding.Error as T
 import qualified Data.ByteString          as BS
-import Lexer
-import StringBuffer
+import GHC.Parser.Lexer
+import GHC.Data.StringBuffer
 import System.FilePath
-import HscTypes (cg_binds, md_types, cg_module, ModDetails, CgGuts, ic_dflags, hsc_IC, HscEnv(hsc_dflags))
-import PackageConfig (PackageConfig)
-import Outputable (showSDocUnsafe, ppr, showSDoc, Outputable)
-import Packages (getPackageConfigMap, lookupPackage')
-import SrcLoc (mkRealSrcLoc)
-import FastString (mkFastString)
-import Module (moduleNameSlashes, InstalledUnitId)
-import OccName (parenSymOcc)
-import RdrName (nameRdrName, rdrNameOcc)
+import GHC.Unit.Module.ModGuts
+import GHC.Unit.Module.ModDetails
+import GHC.Runtime.Context
+import GHC.Driver.Env
+--import UnitInfo (UnitInfo)
+import GHC.Utils.Outputable
+import GHC.Unit.State (unitInfoMap, lookupUnit', preloadClosure)
+import GHC.Types.SrcLoc (mkRealSrcLoc)
+import GHC.Data.FastString (mkFastString)
+import GHC.Unit.Module.Name (moduleNameSlashes)
+import GHC.Unit
+import GHC.Types.Name.Occurrence (parenSymOcc)
+import GHC.Types.Name.Reader (nameRdrName, rdrNameOcc)
+import GHC.Unit.Env
+import GHC.Driver.Config
 
 import Development.IDE.GHC.Compat as GHC
 import Development.IDE.Types.Location
@@ -91,14 +97,14 @@ modifyDynFlags f = do
     h { hsc_dflags = newFlags, hsc_IC = (hsc_IC h) {ic_dflags = newFlags} }
 
 -- | Given a 'UnitId' try and find the associated 'PackageConfig' in the environment.
-lookupPackageConfig :: UnitId -> HscEnv -> Maybe PackageConfig
+lookupPackageConfig :: UnitId -> HscEnv -> Maybe UnitInfo
 lookupPackageConfig unitId env =
-    lookupPackage' False pkgConfigMap unitId
+    lookupUnit' False pkgConfigMap (preloadClosure (ue_units (hsc_unit_env env))) (RealUnit (Definite unitId))
     where
         pkgConfigMap =
             -- For some weird reason, the GHC API does not provide a way to get the PackageConfigMap
             -- from PackageState so we have to wrap it in DynFlags first.
-            getPackageConfigMap $ hsc_dflags env
+            unitInfoMap $ ue_units (hsc_unit_env env)
 
 
 -- | Convert from the @text@ package to the @GHC@ 'StringBuffer'.
@@ -112,7 +118,8 @@ runParser flags str parser = unP parser parseState
       filename = "<interactive>"
       location = mkRealSrcLoc (mkFastString filename) 1 1
       buffer = stringToStringBuffer str
-      parseState = mkPState flags buffer location
+      opts = initParserOpts flags
+      parseState = initParserState opts buffer location
 
 stringBufferToByteString :: StringBuffer -> ByteString
 stringBufferToByteString StringBuffer{..} = PS buf cur len
@@ -122,11 +129,11 @@ bytestringToStringBuffer (PS buf cur len) = StringBuffer{..}
 
 -- | Pretty print a GHC value using 'unsafeGlobalDynFlags '.
 prettyPrint :: Outputable a => a -> String
-prettyPrint = showSDoc unsafeGlobalDynFlags . ppr
+prettyPrint = renderWithContext defaultSDocContext . ppr
 
 -- | Pretty print a 'RdrName' wrapping operators in parens
 printRdrName :: RdrName -> String
-printRdrName name = showSDocUnsafe $ parenSymOcc rn (ppr rn)
+printRdrName name = renderWithContext defaultSDocContext $ parenSymOcc rn (ppr rn)
   where
     rn = rdrNameOcc name
 
@@ -175,7 +182,7 @@ moduleImportPath (takeDirectory . fromNormalizedFilePath -> pathDir) mn
 data HscEnvEq = HscEnvEq
     { envUnique :: !Unique
     , hscEnv :: !HscEnv
-    , deps   :: [(InstalledUnitId, DynFlags)]
+    , deps   :: [(UnitId, DynFlags)]
                -- ^ In memory components for this HscEnv
                -- This is only used at the moment for the import dirs in
                -- the DynFlags
@@ -185,7 +192,7 @@ data HscEnvEq = HscEnvEq
     }
 
 -- | Wrap an 'HscEnv' into an 'HscEnvEq'.
-newHscEnvEq :: FilePath -> HscEnv -> [(InstalledUnitId, DynFlags)] -> IO HscEnvEq
+newHscEnvEq :: FilePath -> HscEnv -> [(UnitId, DynFlags)] -> IO HscEnvEq
 newHscEnvEq cradlePath hscEnv0 deps = do
     envUnique <- newUnique
     let relativeToCradle = (takeDirectory cradlePath </>)
@@ -198,14 +205,14 @@ newHscEnvEq cradlePath hscEnv0 deps = do
 
     return HscEnvEq{..}
 
-newHscEnvEqWithImportPaths :: Maybe [String] -> HscEnv -> [(InstalledUnitId, DynFlags)] -> IO HscEnvEq
+newHscEnvEqWithImportPaths :: Maybe [String] -> HscEnv -> [(UnitId, DynFlags)] -> IO HscEnvEq
 newHscEnvEqWithImportPaths envImportPaths hscEnv deps = do
     envUnique <- newUnique
     return HscEnvEq{..}
 
 -- | Wrap an 'HscEnv' into an 'HscEnvEq'.
 newHscEnvEqPreserveImportPaths
-    :: HscEnv -> [(InstalledUnitId, DynFlags)] -> IO HscEnvEq
+    :: HscEnv -> [(UnitId, DynFlags)] -> IO HscEnvEq
 newHscEnvEqPreserveImportPaths hscEnv deps = do
     let envImportPaths = Nothing
     envUnique <- newUnique
@@ -316,7 +323,7 @@ dupHandleTo filepath h other_side
 
 -- | This is copied unmodified from GHC since it is not exposed.
 -- Note the beautiful inline comment!
-dupHandle_ :: (IODevice dev, BufferedIO dev, Typeable dev) => dev
+dupHandle_ :: (IODevice dev, BufferedIO dev, RawIO dev, Typeable dev) => dev
            -> FilePath
            -> Maybe (MVar Handle__)
            -> Handle__

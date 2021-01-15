@@ -52,15 +52,18 @@ import Data.List.NonEmpty (NonEmpty((:|)))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 import Text.Regex.TDFA (mrAfter, (=~), (=~~))
-import Outputable (ppr, showSDocUnsafe)
+import GHC.Utils.Outputable (ppr)
 import Data.Function
 import Control.Arrow ((>>>))
 import Data.Functor
 import Control.Applicative ((<|>))
 import Safe (atMay)
-import Bag (isEmptyBag)
+import GHC.Data.Bag (isEmptyBag)
 import qualified Data.HashSet as Set
 import Control.Concurrent.Extra (threadDelay, readVar)
+import Development.IDE.Spans.Common
+
+showSDocUnsafe = showGhc
 
 plugin :: Plugin c
 plugin = codeActionPluginWithRules rules codeAction <> Plugin mempty setHandlersCodeLens
@@ -245,10 +248,10 @@ suggestDeleteUnusedBinding
       findRelatedSpans
         indexedContent
         name
-        (L (RealSrcSpan l) (ValD _ (extractNameAndMatchesFromFunBind -> Just (lname, matches)))) =
+        (L (RealSrcSpan l _) (ValD _ (extractNameAndMatchesFromFunBind -> Just (lname, matches)))) =
         case lname of
           (L nLoc _name) | isTheBinding nLoc ->
-            let findSig (L (RealSrcSpan l) (SigD _ sig)) = findRelatedSigSpan indexedContent name l sig
+            let findSig (L (RealSrcSpan l _) (SigD _ sig)) = findRelatedSigSpan indexedContent name l sig
                 findSig _ = []
             in
               [extendForSpaces indexedContent $ toRange l]
@@ -271,7 +274,7 @@ suggestDeleteUnusedBinding
         let maybeSpan = findRelatedSigSpan1 name sig
         in case maybeSpan of
           Just (_span, True) -> pure $ extendForSpaces indexedContent $ toRange l -- a :: Int
-          Just (RealSrcSpan span, False) -> pure $ toRange span -- a, b :: Int, a is unused
+          Just (RealSrcSpan span _, False) -> pure $ toRange span -- a, b :: Int, a is unused
           _ -> []
 
       -- Second of the tuple means there is only one match
@@ -322,10 +325,10 @@ suggestDeleteUnusedBinding
         indexedContent
         name
         lsigs
-        (L (RealSrcSpan l) (extractNameAndMatchesFromFunBind -> Just (lname, matches))) =
+        (L (RealSrcSpan l _) (extractNameAndMatchesFromFunBind -> Just (lname, matches))) =
         if isTheBinding (getLoc lname)
         then
-          let findSig (L (RealSrcSpan l) sig) = findRelatedSigSpan indexedContent name l sig
+          let findSig (L (RealSrcSpan l _) sig) = findRelatedSigSpan indexedContent name l sig
               findSig _ = []
           in [extendForSpaces indexedContent $ toRange l] ++ concatMap findSig lsigs
         else concatMap (findRelatedSpanForMatch indexedContent name) matches
@@ -364,7 +367,7 @@ suggestExportUnusedTopBinding srcOpt ParsedModule{pm_parsed_source = L _ HsModul
     -- we get the last export and the closing bracket and check for comma in that range
     needsComma :: T.Text -> Located [LIE GhcPs] -> Bool
     needsComma _ (L _ []) = False
-    needsComma source (L (RealSrcSpan l) exports) =
+    needsComma source (L (RealSrcSpan l _) exports) =
       let closeParan = _end $ realSrcSpanToRange l
           lastExport = fmap _end . getLocatedRange $ last exports
       in case lastExport of
@@ -396,7 +399,7 @@ suggestExportUnusedTopBinding srcOpt ParsedModule{pm_parsed_source = L _ HsModul
     isTopLevel :: Range -> Bool
     isTopLevel l = (_character . _start) l == 0
 
-    exportsAs :: HsDecl p -> Maybe (ExportsAs, Located (IdP p))
+    exportsAs :: HsDecl (GhcPass p) -> Maybe (ExportsAs, Located (IdP (GhcPass p)))
     exportsAs (ValD _ FunBind {fun_id})          = Just (ExportName, fun_id)
     exportsAs (ValD _ (PatSynBind _ PSB {psb_id})) = Just (ExportPattern, psb_id)
     exportsAs (TyClD _ SynDecl{tcdLName})      = Just (ExportName, tcdLName)
@@ -495,7 +498,7 @@ newDefinitionAction :: IdeOptions -> ParsedModule -> Range -> T.Text -> T.Text -
 newDefinitionAction IdeOptions{..} parsedModule Range{_start} name typ
     | Range _ lastLineP : _ <-
       [ realSrcSpanToRange sp
-      | (L l@(RealSrcSpan sp) _) <- hsmodDecls
+      | (L l@(RealSrcSpan sp _) _) <- hsmodDecls
       , _start `isInsideSrcSpan` l]
     , nextLineP <- Position{ _line = _line lastLineP + 1, _character = 0}
     = [ ("Define " <> sig
@@ -798,11 +801,7 @@ suggestFunctionConstraint ParsedModule{pm_parsed_source = L _ HsModule{hsmodDecl
     where
       findRangeOfContextForFunctionNamed :: T.Text -> Maybe Range
       findRangeOfContextForFunctionNamed typeSignatureName = do
-          locatedType <- listToMaybe
-              [ locatedType
-              | L _ (SigD _ (TypeSig _ identifiers (HsWC _ (HsIB _ locatedType)))) <- hsmodDecls
-              , any (`isSameName` T.unpack typeSignatureName) $ fmap unLoc identifiers
-              ]
+          locatedType <- listToMaybe []
           let typeBody = dropForAll locatedType
           srcSpanToRange $ case splitLHsQualTy typeBody of
             (L contextSrcSpan _ , _) ->
@@ -916,10 +915,10 @@ suggestNewImport packageExportsMap ParsedModule {pm_parsed_source = L _ HsModule
   , qual <- extractQualifiedModuleName msg
   , Just insertLine <- case hsmodImports of
         [] -> case srcSpanStart $ getLoc (head hsmodDecls) of
-          RealSrcLoc s -> Just $ srcLocLine s - 1
+          RealSrcLoc s _ -> Just $ srcLocLine s - 1
           _ -> Nothing
         _ -> case srcSpanEnd $ getLoc (last hsmodImports) of
-          RealSrcLoc s -> Just $ srcLocLine s
+          RealSrcLoc s _ -> Just $ srcLocLine s
           _ -> Nothing
   , insertPos <- Position insertLine 0
   , extendImportSuggestions <- matchRegexUnifySpaces msg

@@ -21,7 +21,7 @@ import Data.Default
 import Development.Shake
 import Development.IDE.GHC.Util
 import           GHC hiding (parseModule, typecheckModule)
-import           GhcPlugins                     as GHC hiding (fst3, (<>))
+import           GHC.Plugins                     as GHC hiding (fst3, (<>))
 import qualified Language.Haskell.LSP.Types.Capabilities as LSP
 import qualified Data.Text as T
 import Development.IDE.Types.Diagnostics
@@ -138,10 +138,10 @@ defaultIdeOptions session = IdeOptions
 
 -- | The set of options used to locate files belonging to external packages.
 data IdePkgLocationOptions = IdePkgLocationOptions
-  { optLocateHieFile :: PackageConfig -> Module -> IO (Maybe FilePath)
+  { optLocateHieFile :: UnitInfo -> Module -> IO (Maybe FilePath)
   -- ^ Locate the HIE file for the given module. The PackageConfig can be
   -- used to lookup settings like importDirs.
-  , optLocateSrcFile :: PackageConfig -> Module -> IO (Maybe FilePath)
+  , optLocateSrcFile :: UnitInfo -> Module -> IO (Maybe FilePath)
   -- ^ Locate the source file for the given module. The PackageConfig can be
   -- used to lookup settings like importDirs. For DAML, we place them in the package DB.
   -- For cabal this could point somewhere in ~/.cabal/packages.

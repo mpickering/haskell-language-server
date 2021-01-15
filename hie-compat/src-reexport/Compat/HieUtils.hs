@@ -1,3 +1,3 @@
 module Compat.HieUtils
-  ( module HieUtils ) where
-import HieUtils
+  ( module GHC.Iface.Ext.Utils ) where
+import GHC.Iface.Ext.Utils

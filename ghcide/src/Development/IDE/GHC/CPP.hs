@@ -23,19 +23,19 @@ module Development.IDE.GHC.CPP(doCpp, addOptP)
 where
 
 import Development.IDE.GHC.Compat
-import Packages
-import SysTools
-import Module
-import Panic
-import FileCleanup
+import GHC.Unit.State
+import GHC.SysTools as SysTools
+--import GHC.Types.Module
+import GHC.Utils.Panic
+import GHC.SysTools.FileCleanup
 #if MIN_GHC_API_VERSION(8,8,2)
-import LlvmCodeGen (llvmVersionList)
+import GHC.CmmToLlvm (llvmVersionList)
 #elif MIN_GHC_API_VERSION(8,8,0)
-import LlvmCodeGen (LlvmVersion (..))
+import GHC.CmmToLlvm (LlvmVersion (..))
 #endif
 #if MIN_GHC_API_VERSION (8,10,0)
-import Fingerprint
-import ToolSettings
+import GHC.Utils.Fingerprint
+import GHC.Settings
 #endif
 
 import System.Directory
@@ -45,15 +45,22 @@ import System.Info
 import Data.List        ( intercalate )
 import Data.Maybe
 import Data.Version
+import GHC.Driver.Env
+import Control.Monad.IO.Class
+import GHC.Unit.Env
+import GHC.Unit.Types
 
 
 
-doCpp :: DynFlags -> Bool -> FilePath -> FilePath -> IO ()
-doCpp dflags raw input_fn output_fn = do
+doCpp :: HscEnv -> Bool -> FilePath -> FilePath -> IO ()
+doCpp hsc_env raw input_fn output_fn = do
+    let dflags = hsc_dflags hsc_env
     let hscpp_opts = picPOpts dflags
     let cmdline_include_paths = includePaths dflags
+    let unit_env = hsc_unit_env hsc_env
 
-    pkg_include_dirs <- getPackageIncludePath dflags []
+    ps <- liftIO $ mayThrowUnitErr (preloadUnitsInfo' unit_env [])
+    let pkg_include_dirs     = collectIncludeDirs ps
     let include_paths_global = foldr (\ x xs -> ("-I" ++ x) : xs) []
           (includePathsGlobal cmdline_include_paths ++ pkg_include_dirs)
     let include_paths_quote = foldr (\ x xs -> ("-iquote" ++ x) : xs) []
@@ -80,8 +87,8 @@ doCpp dflags raw input_fn output_fn = do
         -- and BUILD is the same as our HOST.
 
     let sse_defs =
-          [ "-D__SSE__"      | isSseEnabled      dflags ] ++
-          [ "-D__SSE2__"     | isSse2Enabled     dflags ] ++
+          [ "-D__SSE__"      | isSseEnabled      (targetPlatform dflags) ] ++
+          [ "-D__SSE2__"     | isSse2Enabled     (targetPlatform dflags) ] ++
           [ "-D__SSE4_2__"   | isSse4_2Enabled   dflags ]
 
     let avx_defs =
@@ -96,12 +103,13 @@ doCpp dflags raw input_fn output_fn = do
 
     let th_defs = [ "-D__GLASGOW_HASKELL_TH__" ]
     -- Default CPP defines in Haskell source
-    ghcVersionH <- getGhcVersionPathName dflags
+    ghcVersionH <- getGhcVersionPathName dflags unit_env
     let hsSourceCppOpts = [ "-include", ghcVersionH ]
 
     -- MIN_VERSION macros
-    let uids = explicitPackages (pkgState dflags)
-        pkgs = catMaybes (map (lookupPackage dflags) uids)
+    let ue = hsc_unit_env hsc_env
+    let uids = explicitUnits (ue_units ue)
+        pkgs = catMaybes (map (lookupUnit (ue_units ue)) uids)
     mb_macro_include <-
         if not (null pkgs) && gopt Opt_VersionMacros dflags
             then do macro_stub <- newTempName dflags TFL_CurrentModule "h"
@@ -144,7 +152,7 @@ doCpp dflags raw input_fn output_fn = do
                        ])
 
 getBackendDefs :: DynFlags -> IO [String]
-getBackendDefs dflags | hscTarget dflags == HscLlvm = do
+getBackendDefs dflags | backend dflags == LLVM = do
     llvmVer <- figureLlvmVersion dflags
     return $ case llvmVer of
 #if MIN_GHC_API_VERSION(8,8,2)
@@ -185,13 +193,13 @@ addOptP opt = onSettings (onOptP (opt:))
 -- ---------------------------------------------------------------------------
 -- Macros (cribbed from Cabal)
 
-generatePackageVersionMacros :: [PackageConfig] -> String
+generatePackageVersionMacros :: [UnitInfo] -> String
 generatePackageVersionMacros pkgs = concat
   -- Do not add any C-style comments. See #3389.
   [ generateMacros "" pkgname version
   | pkg <- pkgs
-  , let version = packageVersion pkg
-        pkgname = map fixchar (packageNameString pkg)
+  , let version = unitPackageVersion pkg
+        pkgname = map fixchar (unitPackageNameString pkg)
   ]
 
 fixchar :: Char -> Char
@@ -213,12 +221,13 @@ generateMacros prefix name version =
 
 
 -- | Find out path to @ghcversion.h@ file
-getGhcVersionPathName :: DynFlags -> IO FilePath
-getGhcVersionPathName dflags = do
+getGhcVersionPathName :: DynFlags -> UnitEnv -> IO FilePath
+getGhcVersionPathName dflags unit_env = do
   candidates <- case ghcVersionFile dflags of
     Just path -> return [path]
-    Nothing -> (map (</> "ghcversion.h")) <$>
-               (getPackageIncludePath dflags [toInstalledUnitId rtsUnitId])
+    Nothing -> do
+        ps <- mayThrowUnitErr (preloadUnitsInfo' unit_env [rtsUnitId])
+        return ((</> "ghcversion.h") <$> collectIncludeDirs ps)
 
   found <- filterM doesFileExist candidates
   case found of

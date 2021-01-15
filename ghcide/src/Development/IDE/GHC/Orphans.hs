@@ -10,17 +10,20 @@
 --   Note that the 'NFData' instances may not be law abiding.
 module Development.IDE.GHC.Orphans() where
 
-import           Bag
+import           GHC.Data.Bag
 import           Control.DeepSeq
 import Data.Aeson
 import           Data.Hashable
 import           Development.IDE.GHC.Compat
 import           Development.IDE.GHC.Util
 import           GHC                        ()
-import           GhcPlugins
-import qualified StringBuffer               as SB
+import           GHC.Plugins
+import qualified GHC.Data.StringBuffer               as SB
+import GHC.Unit.Module.ModDetails
 import Data.Text (Text)
 import Data.String (IsString(fromString))
+import GHC.Linker.Types
+import GHC.Types.SourceFile
 
 
 -- Orphan instances for types from the GHC API.
@@ -35,14 +38,14 @@ instance Show Linkable where show = prettyPrint
 instance NFData Linkable where rnf = rwhnf
 instance Show PackageFlag where show = prettyPrint
 instance Show InteractiveImport where show = prettyPrint
-instance Show ComponentId  where show = prettyPrint
+--instance Show ComponentId  where show = prettyPrint
 instance Show PackageName  where show = prettyPrint
-instance Show SourcePackageId  where show = prettyPrint
+--instance Show SourcePackageId  where show = prettyPrint
 
-instance Show InstalledUnitId where
-    show = installedUnitIdString
+instance Show UnitId where
+    show = unitIdString
 
-instance NFData InstalledUnitId where rnf = rwhnf . installedUnitIdFS
+instance NFData UnitId where rnf = rwhnf . unitIdFS
 
 instance NFData SB.StringBuffer where rnf = rwhnf
 
@@ -71,8 +74,8 @@ instance NFData FastString where
 instance NFData ParsedModule where
     rnf = rwhnf
 
-instance Hashable InstalledUnitId where
-  hashWithSalt salt = hashWithSalt salt . installedUnitIdString
+instance Hashable UnitId where
+  hashWithSalt salt = hashWithSalt salt . unitIdString
 
 instance Show HieFile where
     show = show . hie_module
@@ -85,8 +88,6 @@ deriving instance Show SourceModified
 instance NFData SourceModified where
     rnf = rwhnf
 
-instance Show ModuleName where
-    show = moduleNameString
 instance Hashable ModuleName where
     hashWithSalt salt = hashWithSalt salt . show
 

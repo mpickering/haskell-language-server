@@ -123,9 +123,9 @@ import Data.Hashable
 import Development.IDE.Core.Tracing
 
 import Data.IORef
-import NameCache
-import UniqSupply
-import PrelInfo
+import GHC.Types.Name.Cache
+import GHC.Types.Unique.Supply
+import GHC.Builtin.Utils
 import Language.Haskell.LSP.Types.Capabilities
 import OpenTelemetry.Eventlog
 
@@ -606,6 +606,7 @@ newSession extras@ShakeExtras{..} shakeDb acts = do
                 logPriority logger (actionPriority d) msg
                 notifyTestingLogMessage extras msg
 
+        workRun :: (forall b. IO b -> IO b) -> IO (IO ())
         workRun restore = withSpan "Shake session" $ \otSpan -> do
           let acts' = pumpActionThread otSpan : map (run otSpan) (reenqueued ++ acts)
           res <- try @SomeException (restore $ shakeRunDatabase shakeDb acts')

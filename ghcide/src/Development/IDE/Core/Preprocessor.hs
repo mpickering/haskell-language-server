@@ -8,18 +8,18 @@ module Development.IDE.Core.Preprocessor
 import Development.IDE.GHC.CPP
 import Development.IDE.GHC.Orphans()
 import Development.IDE.GHC.Compat
-import GhcMonad
-import StringBuffer as SB
+import GHC.Driver.Monad
+import GHC.Data.StringBuffer as SB
 
 import Data.List.Extra
 import System.FilePath
 import System.IO.Extra
 import Data.Char
-import qualified HeaderInfo as Hdr
+import qualified GHC.Parser.Header as Hdr
 import Development.IDE.Types.Diagnostics
 import Development.IDE.Types.Location
 import Development.IDE.GHC.Error
-import SysTools (Option (..), runUnlit, runPp)
+import GHC.SysTools as SysTools (Option (..), runUnlit, runPp)
 import Control.Monad.Trans.Except
 import qualified GHC.LanguageExtensions as LangExt
 import Data.Maybe
@@ -27,10 +27,10 @@ import Control.Exception.Safe (catch, throw)
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Outputable (showSDoc)
+import GHC.Driver.Ppr (showSDoc)
 import Control.DeepSeq (NFData(rnf))
 import Control.Exception (evaluate)
-import HscTypes (HscEnv(hsc_dflags))
+import GHC.Driver.Env (HscEnv(hsc_dflags))
 
 
 -- | Given a file and some contents, apply any necessary preprocessors,
@@ -55,8 +55,9 @@ preprocessor env filename mbContents = do
             return (isOnDisk, contents, dflags)
         else do
             cppLogs <- liftIO $ newIORef []
+            let hsc_env' = env { hsc_dflags = dflags { log_action = logAction cppLogs } }
             contents <- ExceptT
-                        $ (Right <$> (runCpp dflags {log_action = logAction cppLogs} filename
+                        $ (Right <$> (runCpp hsc_env' filename
                                        $ if isOnDisk then Nothing else Just contents))
                             `catch`
                             ( \(e :: GhcException) -> do
@@ -77,7 +78,7 @@ preprocessor env filename mbContents = do
         return (contents, dflags)
   where
     logAction :: IORef [CPPLog] -> LogAction
-    logAction cppLogs dflags _reason severity srcSpan _style msg = do
+    logAction cppLogs dflags _reason severity srcSpan msg = do
       let log = CPPLog severity srcSpan $ T.pack $ showSDoc dflags msg
       modifyIORef cppLogs (log :)
 
@@ -105,7 +106,7 @@ diagsFromCPPLogs filename logs =
     -- informational log messages and attaches them to the initial log message.
     go :: [CPPDiag] -> [CPPLog] -> [CPPDiag]
     go acc [] = reverse $ map (\d -> d {cdMessage = reverse $ cdMessage d}) acc
-    go acc (CPPLog sev (RealSrcSpan span) msg : logs) =
+    go acc (CPPLog sev (RealSrcSpan span _) msg : logs) =
       let diag = CPPDiag (realSrcSpanToRange span) (toDSeverity sev) [msg]
        in go (diag : acc) logs
     go (diag : diags) (CPPLog _sev (UnhelpfulSpan _) msg : logs) =
@@ -141,8 +142,8 @@ parsePragmasIntoDynFlags env fp contents = catchSrcErrors dflags0 "pragmas" $ do
     evaluate $ rnf opts
 
     (dflags, _, _) <- parseDynamicFilePragma dflags0 opts
-    dflags' <- initializePlugins env dflags
-    return $ disableWarningsAsErrors dflags'
+    dflags' <- initializePlugins env
+    return $ disableWarningsAsErrors dflags
   where dflags0 = hsc_dflags env
 
 -- | Run (unlit) literate haskell preprocessor on a file, or buffer if set
@@ -173,9 +174,10 @@ runLhs dflags filename contents = withTempDir $ \dir -> do
     escape []        = []
 
 -- | Run CPP on a file
-runCpp :: DynFlags -> FilePath -> Maybe SB.StringBuffer -> IO SB.StringBuffer
-runCpp dflags filename contents = withTempDir $ \dir -> do
+runCpp :: HscEnv -> FilePath -> Maybe SB.StringBuffer -> IO SB.StringBuffer
+runCpp hsc_env filename contents = withTempDir $ \dir -> do
     let out = dir </> takeFileName filename <.> "out"
+    let dflags = hsc_dflags hsc_env
     dflags <- pure $ addOptP "-D__GHCIDE__" dflags
 
     case contents of
@@ -183,7 +185,7 @@ runCpp dflags filename contents = withTempDir $ \dir -> do
             -- Happy case, file is not modified, so run CPP on it in-place
             -- which also makes things like relative #include files work
             -- and means location information is correct
-            doCpp dflags True filename out
+            doCpp hsc_env { hsc_dflags = dflags } True filename out
             liftIO $ SB.hGetStringBuffer out
 
         Just contents -> do
@@ -197,7 +199,7 @@ runCpp dflags filename contents = withTempDir $ \dir -> do
             let inp = dir </> "___GHCIDE_MAGIC___"
             withBinaryFile inp WriteMode $ \h ->
                 hPutStringBuffer h contents
-            doCpp dflags True inp out
+            doCpp hsc_env { hsc_dflags = dflags } True inp out
 
             -- Fix up the filename in lines like:
             -- # 1 "C:/Temp/extra-dir-914611385186/___GHCIDE_MAGIC___"

@@ -20,8 +20,8 @@ import qualified Data.Set as S
 import           Development.IDE.GHC.Compat (RefMap, identType, identInfo, getScopeFromContext, getBindSiteFromContext, Scope(..), Name, Type)
 import           Development.IDE.GHC.Error
 import           Development.IDE.Types.Location
-import           NameEnv
-import           SrcLoc
+import           GHC.Types.Name.Env
+import           GHC.Types.SrcLoc
 
 ------------------------------------------------------------------------------
 -- | Turn a 'RealSrcSpan' into an 'Interval'.
@@ -31,14 +31,14 @@ realSrcSpanToInterval rss =
     (realSrcLocToPosition $ realSrcSpanStart rss)
     (realSrcLocToPosition $ realSrcSpanEnd   rss)
 
-bindings :: RefMap -> Bindings
+bindings :: RefMap Type -> Bindings
 bindings = uncurry Bindings . localBindings
 
 ------------------------------------------------------------------------------
 -- | Compute which identifiers are in scope at every point in the AST. Use
 -- 'getLocalScope' to find the results.
 localBindings
-    :: RefMap
+    :: RefMap Type
     -> ( IntervalMap Position (NameEnv (Name, Maybe Type))
        , IntervalMap Position (NameEnv (Name, Maybe Type))
        )

@@ -62,14 +62,19 @@ import System.FilePath
 import System.Info
 import System.IO
 
-import GHCi
-import HscTypes (ic_dflags, hsc_IC, hsc_dflags, hsc_NC)
-import Linker
-import Module
-import NameCache
-import Packages
+import GHC.Runtime.Interpreter
+import GHC.Runtime.Context (ic_dflags)
+import GHC.Driver.Env(hsc_IC, hsc_dflags, hsc_NC, hsc_interp)
+--import GHC.Runtime.Linker
+import GHC.Unit.State
+import GHC.Types.Name.Cache
+--import Packages
 import Control.Exception (evaluate)
 import Data.Void
+import GHC.Linker.Loader
+import GHC.Unit.Module.Name
+import GHC.Unit.Types
+import GHC.Runtime.Interpreter.Types
 
 
 data CacheDirs = CacheDirs
@@ -183,7 +188,7 @@ loadSessionWithOptions SessionLoadingOptions{..} dir = do
                   -- We will modify the unitId and DynFlags used for
                   -- compilation but these are the true source of
                   -- information.
-                  new_deps = RawComponentInfo (thisInstalledUnitId df) df targets cfp opts dep_info
+                  new_deps = RawComponentInfo (homeUnitId_ df) df targets cfp opts dep_info
                                 : maybe [] snd oldDeps
                   -- Get all the unit-ids for things in this component
                   inplace = map rawComponentUnitId new_deps
@@ -218,7 +223,8 @@ loadSessionWithOptions SessionLoadingOptions{..} dir = do
                 -- Add the options for the current component to the HscEnv
                 evalGhcEnv hscEnv $ do
                   _ <- setSessionDynFlags df
-                  getSession
+                  env <- getSession
+                  return env
 
               -- Modify the map so the hieYaml now maps to the newly created
               -- HscEnv
@@ -314,14 +320,7 @@ loadSessionWithOptions SessionLoadingOptions{..} dir = do
              -- The cradle gave us some options so get to work turning them
              -- into and HscEnv.
              Right (opts, libDir) -> do
-               installationCheck <- ghcVersionChecker libDir
-               case installationCheck of
-                 InstallationNotFound{..} ->
-                     error $ "GHC installation not found in libdir: " <> libdir
-                 InstallationMismatch{..} ->
-                     return (([renderPackageSetupException cfp GhcVersionMismatch{..}], Nothing),[])
-                 InstallationChecked _compileTime _ghcLibCheck ->
-                   session (hieYaml, toNormalizedFilePath' cfp, opts, libDir)
+               session (hieYaml, toNormalizedFilePath' cfp, opts, libDir)
              -- Failure case, either a cradle error or the none cradle
              Left err -> do
                dep_info <- getDependencyInfo (maybeToList hieYaml)
@@ -400,8 +399,8 @@ cradleToOptsAndLibDir cradle file = do
 emptyHscEnv :: IORef NameCache -> FilePath -> IO HscEnv
 emptyHscEnv nc libDir = do
     env <- runGhc (Just libDir) getSession
-    initDynLinker env
-    pure $ setNameCache nc env{ hsc_dflags = (hsc_dflags env){useUnicode = True } }
+    pure $ setNameCache nc env{ hsc_dflags = (hsc_dflags env){useUnicode = True }
+                              , hsc_interp = Just InternalInterp }
 
 data TargetDetails = TargetDetails
   {
@@ -617,14 +616,14 @@ getDependencyInfo fs = Map.fromList <$> mapM do_one fs
 -- There are several places in GHC (for example the call to hptInstances in
 -- tcRnImports) which assume that all modules in the HPT have the same unit
 -- ID. Therefore we create a fake one and give them all the same unit id.
-removeInplacePackages :: [InstalledUnitId] -> DynFlags -> (DynFlags, [InstalledUnitId])
+removeInplacePackages :: [InstalledUnitId] -> DynFlags -> (DynFlags, [UnitId])
 removeInplacePackages us df = (df { packageFlags = ps
-                                  , thisInstalledUnitId = fake_uid }, uids)
+                                  , homeUnitId_ = fake_uid }, map toUnitId uids)
   where
     (uids, ps) = partitionEithers (map go (packageFlags df))
-    fake_uid = toInstalledUnitId (stringToUnitId "fake_uid")
-    go p@(ExposePackage _ (UnitIdArg u) _) = if toInstalledUnitId u `elem` us
-                                                  then Left (toInstalledUnitId u)
+    fake_uid = (stringToUnitId "fake_uid")
+    go p@(ExposePackage _ (UnitIdArg u) _) = if toUnitId u `elem` us
+                                                  then Left u
                                                   else Right p
     go p = Right p
 
@@ -646,7 +645,7 @@ memoIO op = do
             Just res -> return (mp, res)
 
 -- | Throws if package flags are unsatisfiable
-setOptions :: GhcMonad m => ComponentOptions -> DynFlags -> m (DynFlags, [GHC.Target])
+setOptions :: GhcMonad m => ComponentOptions -> DynFlags -> m (DynFlags,  [GHC.Target])
 setOptions (ComponentOptions theOpts compRoot _) dflags = do
     (dflags', targets') <- addCmdOpts theOpts dflags
     let targets = makeTargetsAbsolute compRoot targets'
@@ -665,7 +664,8 @@ setOptions (ComponentOptions theOpts compRoot _) dflags = do
     -- initPackages parses the -package flags and
     -- sets up the visibility for each component.
     -- Throws if a -package flag cannot be satisfied.
-    (final_df, _) <- liftIO $ wrapPackageSetupException $ initPackages dflags''
+    let final_df = dflags''
+--    pstate <- liftIO $ wrapPackageSetupException $ initUnits dflags''
     return (final_df, targets)
 
 
@@ -675,7 +675,7 @@ setOptions (ComponentOptions theOpts compRoot _) dflags = do
 setLinkerOptions :: DynFlags -> DynFlags
 setLinkerOptions df = df {
     ghcLink   = LinkInMemory
-  , hscTarget = HscNothing
+  , backend = NoBackend
   , ghcMode = CompManager
   }
 

@@ -42,16 +42,19 @@ import Development.IDE.GHC.Orphans()
 import Development.IDE.GHC.Util
 import Development.IDE.Types.Options
 import Development.IDE.Types.Location
+import GHC.Parser.Errors.Ppr
+import GHC.Types.SourceText
 
 import Language.Haskell.LSP.Types (DiagnosticTag(..))
 
-import LoadIface (loadModuleInterface)
-import DriverPhases
-import HscTypes
-import DriverPipeline hiding (unP)
+import GHC.Iface.Load (loadModuleInterface, writeIface)
+import GHC.Unit.Home
+--import DriverPhases
+--import HscTypes
+--import DriverPipeline hiding (unP)
 
-import qualified Parser
-import           Lexer
+import qualified GHC.Parser as Parser
+import           GHC.Parser.Lexer
 #if MIN_GHC_API_VERSION(8,10,0)
 import Control.DeepSeq (force, rnf)
 #else
@@ -59,20 +62,20 @@ import Control.DeepSeq (rnf)
 import ErrUtils
 #endif
 
-import           Finder
+--import           Finder
 import           Development.IDE.GHC.Compat hiding (parseModule, typecheckModule, writeHieFile)
 import qualified Development.IDE.GHC.Compat     as GHC
 import qualified Development.IDE.GHC.Compat     as Compat
-import           GhcMonad
-import           GhcPlugins                     as GHC hiding (fst3, (<>))
-import           HscMain                        (makeSimpleDetails, hscDesugar, hscTypecheckRename, hscSimplify, hscGenHardCode, hscInteractive)
-import           MkIface
-import           StringBuffer                   as SB
-import           TcRnMonad
-import           TcIface                        (typecheckIface)
-import           TidyPgm
-import           Hooks
-import           TcSplice
+import           GHC.Driver.Monad
+import           GHC.Plugins                     as GHC hiding (fst3, (<>))
+import           GHC.Driver.Main                        (makeSimpleDetails, hscDesugar, hscTypecheckRename, hscSimplify, hscGenHardCode, hscInteractive)
+--import           GHC.Iface.Utils
+import           GHC.Data.StringBuffer                   as SB
+import           GHC.Tc.Utils.Monad
+import           GHC.IfaceToCore                        (typecheckIface)
+import           GHC.Iface.Tidy
+import           GHC.Driver.Hooks
+import           GHC.Tc.Gen.Splice
 
 import Control.Exception.Safe
 import Control.Lens hiding (List)
@@ -90,15 +93,26 @@ import           System.FilePath
 import           System.Directory
 import System.IO.Extra ( fixIO, newTempFileWithin )
 import Control.Exception (evaluate)
-import TcEnv (tcLookup)
+import GHC.Tc.Utils.Env (tcLookup)
 import qualified Data.DList as DL
 import Data.Time (UTCTime, getCurrentTime)
-import Bag
-import Linker (unload)
+import GHC.Data.Bag
+--import Linker (unload)
 import qualified GHC.LanguageExtensions as LangExt
-import PrelNames
-import HeaderInfo
-import Maybes (orElse)
+import GHC.Builtin.Names
+import GHC.Parser.Header
+import GHC.Data.Maybe (orElse)
+import GHC.Linker.Types
+import GHC.Unit.Home.ModInfo
+import GHC.Iface.Recomp
+import GHC.Types.SourceFile
+import GHC.Unit.Finder
+import GHC.Driver.Config
+import GHC.Driver.Phases
+import GHC.Driver.Pipeline (compileFile)
+import GHC.Iface.Make (mkFullIface, mkPartialIface, mkIfaceTc)
+import GHC.Linker.Loader
+import GHC.Unit.Env
 
 -- | Given a string buffer, return the string (after preprocessing) and the 'ParsedModule'.
 parseModule
@@ -121,10 +135,11 @@ computePackageDeps
     -> IO (Either [FileDiagnostic] [InstalledUnitId])
 computePackageDeps env pkg = do
     let dflags = hsc_dflags env
-    case lookupInstalledPackage dflags pkg of
+        ue     = hsc_unit_env env
+    case lookupUnit (ue_units ue) (RealUnit (Definite pkg)) of
         Nothing -> return $ Left [ideErrorText (toNormalizedFilePath' noFilePath) $
             T.pack $ "unknown package: " ++ show pkg]
-        Just pkgInfo -> return $ Right $ depends pkgInfo
+        Just pkgInfo -> return $ Right $ unitDepends pkgInfo
 
 typecheckModule :: IdeDefer
                 -> HscEnv
@@ -138,10 +153,10 @@ typecheckModule (IdeDefer defer) hsc keep_lbls pm = do
         let modSummary = pm_mod_summary pm
             dflags = ms_hspp_opts modSummary
 
-        modSummary' <- initPlugins hsc modSummary
+        hsc' <- initPlugins hsc modSummary
         (warnings, tcm) <- withWarnings "typecheck" $ \tweak ->
-            tcRnModule hsc keep_lbls $ enableTopLevelWarnings
-                                     $ demoteIfDefer pm{pm_mod_summary = tweak modSummary'}
+            tcRnModule hsc' keep_lbls $ enableTopLevelWarnings
+                                     $ demoteIfDefer pm{pm_mod_summary = tweak modSummary}
         let errorPipeline = unDefer . hideDiag dflags . tagDiag
             diags = map errorPipeline warnings
             deferedError = any fst diags
@@ -248,7 +263,7 @@ mkHiFileResultCompile session' tcm simplified_guts ltype = catchErrs $ do
         pure (linkable, details, diags)
 #if MIN_GHC_API_VERSION(8,10,0)
   let !partial_iface = force (mkPartialIface session details simplified_guts)
-  final_iface <- mkFullIface session partial_iface
+  final_iface <- mkFullIface session partial_iface Nothing
 #else
   (final_iface,_) <- mkIface session Nothing details simplified_guts
 #endif
@@ -264,10 +279,9 @@ mkHiFileResultCompile session' tcm simplified_guts ltype = catchErrs $ do
       . (("Error during " ++ T.unpack source) ++) . show @SomeException
       ]
 
-initPlugins :: HscEnv -> ModSummary -> IO ModSummary
-initPlugins session modSummary = do
-    dflags <- liftIO $ initializePlugins session $ ms_hspp_opts modSummary
-    return modSummary{ms_hspp_opts = dflags}
+initPlugins :: HscEnv -> ModSummary -> IO HscEnv
+initPlugins session modSummary =
+    initializePlugins session { hsc_dflags = ms_hspp_opts modSummary }
 
 -- | Whether we should run the -O0 simplifier when generating core.
 --
@@ -308,8 +322,8 @@ generateObjectCode session summary guts = do
               (warnings, dot_o_fp) <-
                 withWarnings "object" $ \_tweak -> do
                       let summary' = _tweak summary
-                          session' = session { hsc_dflags = (ms_hspp_opts summary') { outputFile = Just dot_o }}
-                      (outputFilename, _mStub, _foreign_files) <- hscGenHardCode session' guts
+                          session' = session { hsc_dflags = (ms_hspp_opts summary') { outputFile_ = Just dot_o }}
+                      (outputFilename, _mStub, _foreign_files, _) <- hscGenHardCode session' guts
 #if MIN_GHC_API_VERSION(8,10,0)
                                 (ms_location summary')
 #else
@@ -445,7 +459,7 @@ generateHieAsts hscEnv tcm =
     -- don't export an interface which allows for additional information to be added to hie files.
     let fake_splice_binds = listToBag (map (mkVarBind unitDataConId) (spliceExpresions $ tmrTopLevelSplices tcm))
         real_binds = tcg_binds $ tmrTypechecked tcm
-    Just <$> GHC.enrichHie (fake_splice_binds `unionBags` real_binds) (tmrRenamed tcm)
+    Just <$> GHC.enrichHie (fake_splice_binds `unionBags` real_binds) (tmrRenamed tcm) emptyBag [] []
   where
     dflags = hsc_dflags hscEnv
 
@@ -474,7 +488,7 @@ writeHiFile :: HscEnv -> HiFileResult -> IO [FileDiagnostic]
 writeHiFile hscEnv tc =
   handleGenerationErrors dflags "interface generation" $ do
     atomicFileWrite targetPath $ \fp ->
-      writeIfaceFile dflags fp modIface
+      writeIface dflags fp modIface
   where
     modIface = hm_iface $ hirHomeMod tc
     targetPath = ml_hi_file $ ms_location $ hirModSummary tc
@@ -503,7 +517,8 @@ setupFinderCache mss session = do
 
     -- Make modules available for others that import them,
     -- by putting them in the finder cache.
-    let ims  = map (InstalledModule (thisInstalledUnitId $ hsc_dflags session) . moduleName . ms_mod) mss
+    let ims :: [InstalledModule]
+        ims  = map (Module (homeUnitId $ hsc_home_unit session) . moduleName . ms_mod) mss
         ifrs = zipWith (\ms -> InstalledFound (ms_location ms)) mss ims
     -- set the target and module graph in the session
         graph = mkModuleGraph mss
@@ -561,7 +576,7 @@ getModSummaryFromImports env fp modTime contents = do
 
         mod = fmap unLoc mb_mod `orElse` mAIN_NAME
 
-        (src_idecls, ord_idecls) = partition (ideclSource.unLoc) imps
+        (src_idecls, ord_idecls) = partition ((== IsBoot) . ideclSource.unLoc) imps
 
         -- GHC.Prim doesn't exist physically, so don't go looking for it.
         ordinary_imps = filter ((/= moduleName gHC_PRIM) . unLoc
@@ -585,11 +600,11 @@ getModSummaryFromImports env fp modTime contents = do
 
     modLoc <- liftIO $ mkHomeModLocation dflags mod fp
 
-    let modl = mkModule (thisPackage dflags) mod
+    let modl = mkModule ((hsc_home_unit env)) mod
         sourceType = if "-boot" `isSuffixOf` takeExtension fp then HsBootFile else HsSrcFile
         summary =
             ModSummary
-                { ms_mod          = modl
+                { ms_mod          = fmap homeUnitAsUnit modl
 #if MIN_GHC_API_VERSION(8,8,0)
                 , ms_hie_date     = Nothing
 #endif
@@ -614,19 +629,20 @@ parseHeader
        => DynFlags -- ^ flags to use
        -> FilePath  -- ^ the filename (for source locations)
        -> SB.StringBuffer -- ^ Haskell module source text (full Unicode is supported)
-       -> ExceptT [FileDiagnostic] m ([FileDiagnostic], Located(HsModule GhcPs))
+       -> ExceptT [FileDiagnostic] m ([FileDiagnostic], Located(HsModule))
 parseHeader dflags filename contents = do
    let loc  = mkRealSrcLoc (mkFastString filename) 1 1
-   case unP Parser.parseHeader (mkPState dflags contents loc) of
+       opts = initParserOpts dflags
+   case unP Parser.parseHeader (initParserState opts contents loc) of
 #if MIN_GHC_API_VERSION(8,10,0)
      PFailed pst ->
-        throwE $ diagFromErrMsgs "parser" dflags $ getErrorMessages pst dflags
+        throwE $ diagFromErrMsgs "parser" dflags $ fmap pprError $ getErrorMessages pst
 #else
      PFailed _ locErr msgErr ->
         throwE $ diagFromErrMsg "parser" dflags $ mkPlainErrMsg dflags locErr msgErr
 #endif
      POk pst rdr_module -> do
-        let (warns, errs) = getMessages pst dflags
+        let (warns, errs) = getMessages pst
         -- Just because we got a `POk`, it doesn't mean there
         -- weren't errors! To clarify, the GHC parser
         -- distinguishes between fatal and non-fatal
@@ -637,9 +653,9 @@ parseHeader dflags filename contents = do
         -- errors are those from which a parse tree just can't
         -- be produced.
         unless (null errs) $
-            throwE $ diagFromErrMsgs "parser" dflags errs
+            throwE $ diagFromErrMsgs "parser" dflags (fmap pprError errs)
 
-        let warnings = diagFromErrMsgs "parser" dflags warns
+        let warnings = diagFromErrMsgs "parser" dflags (fmap pprWarning warns)
         return (warnings, rdr_module)
 
 -- | Given a buffer, flags, and file path, produce a
@@ -655,19 +671,22 @@ parseFileContents env customPreprocessor filename ms = do
    let loc  = mkRealSrcLoc (mkFastString filename) 1 1
        dflags = ms_hspp_opts ms
        contents = fromJust $ ms_hspp_buf ms
-   case unP Parser.parseModule (mkPState dflags contents loc) of
+       opts = initParserOpts dflags
+   case unP Parser.parseModule (initParserState opts contents loc) of
 #if MIN_GHC_API_VERSION(8,10,0)
-     PFailed pst -> throwE $ diagFromErrMsgs "parser" dflags $ getErrorMessages pst dflags
+     PFailed pst -> throwE $ diagFromErrMsgs "parser" dflags $ fmap pprError $ getErrorMessages pst
 #else
      PFailed _ locErr msgErr ->
       throwE $ diagFromErrMsg "parser" dflags $ mkPlainErrMsg dflags locErr msgErr
 #endif
      POk pst rdr_module ->
-         let hpm_annotations =
-               (Map.fromListWith (++) $ annotations pst,
-                 Map.fromList ((noSrcSpan,comment_q pst)
-                                  :annotations_comments pst))
-             (warns, errs) = getMessages pst dflags
+        let api_anns = ApiAnns {
+                      apiAnnItems = Map.fromListWith (++) $ annotations pst,
+                      apiAnnEofPos = eof_pos pst,
+                      apiAnnComments = Map.fromList (annotations_comments pst),
+                      apiAnnRogueComments = comment_q pst
+         }
+            (fmap pprWarning -> warns, fmap pprError -> errs) = getMessages pst
          in
            do
                -- Just because we got a `POk`, it doesn't mean there
@@ -689,7 +708,7 @@ parseFileContents env customPreprocessor filename ms = do
                   throwE $ diagFromStrings "parser" DsError errs
 
                let preproc_warnings = diagFromStrings "parser" DsWarning preproc_warns
-               parsed' <- liftIO $ applyPluginsParsedResultAction env dflags ms hpm_annotations parsed
+               parsed' <- liftIO $ applyPluginsParsedResultAction env dflags ms api_anns parsed
 
                -- To get the list of extra source files, we take the list
                -- that the parser gave us,
@@ -722,7 +741,7 @@ parseFileContents env customPreprocessor filename ms = do
                          pm_mod_summary = ms
                        , pm_parsed_source = parsed'
                        , pm_extra_src_files = srcs2
-                       , pm_annotations = hpm_annotations
+                       , pm_annotations = api_anns
                       }
                    warnings = diagFromErrMsgs "parser" dflags warns
                pure (warnings ++ preproc_warnings, pm)

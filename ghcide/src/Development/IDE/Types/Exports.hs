@@ -9,22 +9,22 @@ module Development.IDE.Types.Exports
     createExportsMapTc
 ) where
 
-import Avail (AvailInfo(..))
+import GHC.Types.Avail (AvailInfo(..))
 import Control.DeepSeq (NFData)
 import Data.Text (pack, Text)
 import Development.IDE.GHC.Compat
 import Development.IDE.GHC.Util
 import Data.HashMap.Strict (HashMap)
 import GHC.Generics (Generic)
-import Name
-import FieldLabel (flSelector)
+import GHC.Types.Name
+import GHC.Types.FieldLabel (flSelector)
 import qualified Data.HashMap.Strict as Map
-import GhcPlugins (IfaceExport, ModGuts(..))
+import GHC.Plugins (IfaceExport, ModGuts(..))
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as Set
 import Data.Bifunctor (Bifunctor(second))
 import Data.Hashable (Hashable)
-import TcRnTypes(TcGblEnv(..))
+import GHC.Tc.Types(TcGblEnv(..))
 
 newtype ExportsMap = ExportsMap
     {getExportsMap :: HashMap IdentifierText (HashSet (IdentInfo,ModuleNameText))}

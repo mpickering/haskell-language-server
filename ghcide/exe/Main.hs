@@ -56,6 +56,7 @@ import Development.IDE.Plugin.HLS (asGhcIdePlugin)
 import Development.IDE.Plugin.HLS.GhcIde as GhcIde
 import Ide.Plugin.Config
 import Ide.PluginUtils (allLspCmdIds', getProcessID, pluginDescToIdePlugins)
+import GHC.Debug.Stub
 
 ghcideVersion :: IO String
 ghcideVersion = do
@@ -69,7 +70,7 @@ ghcideVersion = do
              <> gitHashSection
 
 main :: IO ()
-main = do
+main = withGhcDebug $ do
     -- WARNING: If you write to stdout before runLanguageServer
     --          then the language server will not work
     Arguments{..} <- getArguments

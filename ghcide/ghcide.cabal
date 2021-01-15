@@ -197,7 +197,7 @@ library
         Development.IDE.Plugin.Completions.Types
         Development.IDE.Plugin.HLS.Formatter
         Development.IDE.Types.Action
-    ghc-options: -Wall -Wno-name-shadowing -Wincomplete-uni-patterns
+    ghc-options: -Wall -Wno-name-shadowing -Wincomplete-uni-patterns -finfo-table-map -fdistinct-constructor-tables
 
 executable ghcide-test-preprocessor
     default-language: Haskell2010
@@ -275,7 +275,8 @@ executable ghcide
         lens,
         optparse-applicative,
         text,
-        unordered-containers
+        unordered-containers,
+        ghc-debug-stub
     other-modules:
         Arguments
         Paths_ghcide
@@ -323,7 +324,6 @@ test-suite ghcide-tests
         ghc,
         --------------------------------------------------------------
         ghcide,
-        ghc-typelits-knownnat,
         haddock-library,
         haskell-lsp,
         haskell-lsp-types,
@@ -345,10 +345,6 @@ test-suite ghcide-tests
         tasty-quickcheck,
         tasty-rerun,
         text
-    if (impl(ghc >= 8.6))
-      build-depends:
-          record-dot-preprocessor,
-          record-hasfield
     hs-source-dirs: test/cabal test/exe test/src bench/lib
     include-dirs: include
     ghc-options: -threaded -Wall -Wno-name-shadowing -O0

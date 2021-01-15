@@ -19,24 +19,35 @@ import Development.IDE.Types.Diagnostics
 import Development.IDE.Types.Location
 import Development.IDE.GHC.Compat
 -- GHC imports
-import           FastString
-import qualified Module                      as M
-import           Packages
-import           Outputable                  (showSDoc, ppr, pprPanic)
-import           Finder
+import           GHC.Data.FastString
+--import qualified GHC.Types.Module                      as M
+--import           Packages
+import           GHC.Driver.Ppr                  (showSDoc)
+import GHC.Utils.Outputable
+--import           GHC.Driver.Finder
 import Control.DeepSeq
+import GHC.Unit.State
+import GHC.Unit.Finder.Types
+import GHC.Unit.Module.Name as M
+import GHC.Unit.Types as M
+import GHC.Types.SourceFile
+import GHC.Unit.Finder
 
 -- standard imports
 import           Control.Monad.Extra
 import           Control.Monad.IO.Class
 import           System.FilePath
-import DriverPhases
+import GHC.Driver.Phases
 import Data.Maybe
 import Data.List (isSuffixOf)
+import GHC.Driver.Env
+import GHC.Unit.Env
+import GHC.Iface.Load
+import GHC.Utils.Panic
 
 data Import
   = FileImport !ArtifactsLocation
-  | PackageImport !M.InstalledUnitId
+  | PackageImport !M.UnitId
   deriving (Show)
 
 data ArtifactsLocation = ArtifactsLocation
@@ -87,22 +98,22 @@ locateModuleFile import_dirss exts doesExist isSource modName = do
 -- It only returns Just for unit-ids which are possible to import into the
 -- current module. In particular, it will return Nothing for 'main' components
 -- as they can never be imported into another package.
-mkImportDirs :: DynFlags -> (M.InstalledUnitId, DynFlags) -> Maybe (PackageName, [FilePath])
+mkImportDirs :: UnitState -> (M.UnitId, DynFlags) -> Maybe (PackageName, [FilePath])
 mkImportDirs df (i, DynFlags{importPaths}) = (, importPaths) <$> getPackageName df i
 
 -- | locate a module in either the file system or the package database. Where we go from *daml to
 -- Haskell
 locateModule
     :: MonadIO m
-    => DynFlags
-    -> [(M.InstalledUnitId, DynFlags)] -- ^ Import directories
+    => HscEnv
+    -> [(M.UnitId, DynFlags)] -- ^ Import directories
     -> [String]                        -- ^ File extensions
     -> (ModuleName -> NormalizedFilePath -> m Bool)  -- ^ does file exist predicate
     -> Located ModuleName              -- ^ Moudle name
     -> Maybe FastString                -- ^ Package name
     -> Bool                            -- ^ Is boot module
     -> m (Either [FileDiagnostic] Import)
-locateModule dflags comp_info exts doesExist modName mbPkgName isSource = do
+locateModule hsc_env comp_info exts doesExist modName mbPkgName isSource = do
   case mbPkgName of
     -- "this" means that we should only look in the current package
     Just "this" -> do
@@ -111,7 +122,7 @@ locateModule dflags comp_info exts doesExist modName mbPkgName isSource = do
     Just pkgName
       | Just dirs <- lookup (PackageName pkgName) import_paths
           -> lookupLocal [dirs]
-      | otherwise -> lookupInPackageDB dflags
+      | otherwise -> lookupInPackageDB (ue_units ue)
     Nothing -> do
       -- first try to find the module as a file. If we can't find it try to find it in the package
       -- database.
@@ -120,10 +131,12 @@ locateModule dflags comp_info exts doesExist modName mbPkgName isSource = do
       -- each component will end up being found in the wrong place and cause a multi-cradle match failure.
       mbFile <- locateModuleFile (importPaths dflags : map snd import_paths) exts doesExist isSource $ unLoc modName
       case mbFile of
-        Nothing -> lookupInPackageDB dflags
+        Nothing -> lookupInPackageDB (ue_units ue)
         Just file -> toModLocation file
   where
-    import_paths = mapMaybe (mkImportDirs dflags) comp_info
+    dflags = hsc_dflags hsc_env
+    ue = hsc_unit_env hsc_env
+    import_paths = mapMaybe (mkImportDirs (ue_units ue)) comp_info
     toModLocation file = liftIO $ do
         loc <- mkHomeModLocation dflags (unLoc modName) (fromNormalizedFilePath file)
         return $ Right $ FileImport $ ArtifactsLocation file (Just loc) (not isSource)
@@ -131,21 +144,22 @@ locateModule dflags comp_info exts doesExist modName mbPkgName isSource = do
     lookupLocal dirs = do
       mbFile <- locateModuleFile dirs exts doesExist isSource $ unLoc modName
       case mbFile of
-        Nothing -> return $ Left $ notFoundErr dflags modName $ LookupNotFound []
+        Nothing -> return $ Left $ notFoundErr hsc_env modName $ LookupNotFound []
         Just file -> toModLocation file
 
     lookupInPackageDB dfs =
       case lookupModuleWithSuggestions dfs (unLoc modName) mbPkgName of
         LookupFound _m pkgConfig -> return $ Right $ PackageImport $ unitId pkgConfig
-        reason -> return $ Left $ notFoundErr dfs modName reason
+        reason -> return $ Left $ notFoundErr hsc_env modName reason
 
 -- | Don't call this on a found module.
-notFoundErr :: DynFlags -> Located M.ModuleName -> LookupResult -> [FileDiagnostic]
-notFoundErr dfs modName reason =
-  mkError' $ ppr' $ cannotFindModule dfs modName0 $ lookupToFindResult reason
+notFoundErr :: HscEnv -> Located M.ModuleName -> LookupResult -> [FileDiagnostic]
+notFoundErr hsc_env modName reason =
+  mkError' $ ppr' $ cannotFindModule hsc_env modName0 $ lookupToFindResult reason
   where
     mkError' = diagFromString "not found" DsError (getLoc modName)
     modName0 = unLoc modName
+    dfs = hsc_dflags hsc_env
     ppr' = showSDoc dfs
     -- We convert the lookup result to a find result to reuse GHC's cannotFindMoudle pretty printer.
     lookupToFindResult =
@@ -155,12 +169,12 @@ notFoundErr dfs modName reason =
         LookupMultiple rs -> FoundMultiple rs
         LookupHidden pkg_hiddens mod_hiddens ->
           notFound
-             { fr_pkgs_hidden = map (moduleUnitId . fst) pkg_hiddens
-             , fr_mods_hidden = map (moduleUnitId . fst) mod_hiddens
+             { fr_pkgs_hidden = map (moduleUnit . fst) pkg_hiddens
+             , fr_mods_hidden = map (moduleUnit . fst) mod_hiddens
              }
         LookupUnusable unusable ->
           let unusables' = map get_unusable unusable
-              get_unusable (m, ModUnusable r) = (moduleUnitId m, r)
+              get_unusable (m, ModUnusable r) = (moduleUnit m, r)
               get_unusable (_, r) =
                 pprPanic "findLookupResult: unexpected origin" (ppr r)
            in notFound {fr_unusables = unusables'}

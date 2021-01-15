@@ -5,7 +5,7 @@ module Development.IDE.Plugin.Completions.Types (
 import           Control.DeepSeq
 import qualified Data.Map  as Map
 import qualified Data.Text as T
-import SrcLoc
+import GHC.Types.SrcLoc
 
 import Development.IDE.Spans.Common
 import Language.Haskell.LSP.Types (TextEdit, CompletionItemKind)
