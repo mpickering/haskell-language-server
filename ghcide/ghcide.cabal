@@ -181,6 +181,7 @@ library
         Development.IDE.Plugin.HLS.GhcIde
         Development.IDE.Plugin.Test
         Development.IDE.Plugin.TypeLenses
+        Development.IDE.Types.Action
 
     -- Unfortunately, we cannot use loadSession with ghc-lib since hie-bios uses
     -- the real GHC library and the types are incompatible. Furthermore, when
@@ -205,7 +206,6 @@ library
         Development.IDE.Plugin.CodeAction.PositionIndexed
         Development.IDE.Plugin.Completions.Logic
         Development.IDE.Plugin.HLS.Formatter
-        Development.IDE.Types.Action
     ghc-options: -Wall -Wno-name-shadowing -Wincomplete-uni-patterns
 
 executable ghcide-test-preprocessor

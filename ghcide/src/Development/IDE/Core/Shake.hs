@@ -22,7 +22,7 @@
 --   always stored as real Haskell values, whereas Shake serialises all 'A' values
 --   between runs. To deserialise a Shake value, we just consult Values.
 module Development.IDE.Core.Shake(
-    IdeState, shakeExtras,
+    IdeState(..), shakeExtras, newSession,
     ShakeExtras(..), getShakeExtras, getShakeExtrasRules,
     KnownTargets, Target(..), toKnownFiles,
     IdeRule, IdeResult,
@@ -685,19 +685,13 @@ newSession extras@ShakeExtras{..} shakeDb acts = do
         -- Runs actions from the work queue sequentially
         pumpActionThread otSpan = do
             d <- liftIO $ atomically $ popQueue actionQueue
-            void $ parallel [run otSpan d, pumpActionThread otSpan]
+            () <$ parallel [run otSpan d, pumpActionThread otSpan]
 
         -- TODO figure out how to thread the otSpan into defineEarlyCutoff
         run _otSpan d  = do
             start <- liftIO offsetTime
             getAction d
             liftIO $ atomically $ doneQueue d actionQueue
-            runTime <- liftIO start
-            let msg = T.pack $ "finish: " ++ actionName d
-                            ++ " (took " ++ showDuration runTime ++ ")"
-            liftIO $ do
-                logPriority logger (actionPriority d) msg
-                notifyTestingLogMessage extras msg
 
         workRun restore = withSpan "Shake session" $ \otSpan -> do
           let acts' = pumpActionThread otSpan : map (run otSpan) (reenqueued ++ acts)
@@ -923,7 +917,7 @@ defineEarlyCutoff op = addBuiltinRule noLint noIdentity $ \(Q (key, file)) (old 
                                     (toShakeValue ShakeResult bs, Failed b)
                     Just v -> pure (maybe ShakeNoCutoff ShakeResult bs, Succeeded (vfsVersion =<< modTime) v)
                 liftIO $ setValues state key file res (Vector.fromList diags)
-                updateFileDiagnostics file (Key key) extras $ map (\(_,y,z) -> (y,z)) diags
+--                updateFileDiagnostics file (Key key) extras $ map (\(_,y,z) -> (y,z)) diags
                 let eq = case (bs, fmap decodeShakeValue old) of
                         (ShakeResult a, Just (ShakeResult b)) -> a == b
                         (ShakeStale a, Just (ShakeStale b)) -> a == b
